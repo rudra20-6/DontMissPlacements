@@ -1,0 +1,47 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick your fork of this repo.
+# Defaults match the setup that works for IIIT (iiit.ac.in) accounts:
+# college Outlook -> forwarded to a Gmail "mailbot" -> read over IMAP. See HOW_TO_RUN.md.
+services:
+  - type: web
+    name: dontmissthosemails
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # exactly ONE worker: the in-process scheduler must not run twice
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.10
+      # Generate it yourself (URL-safe): py -c "import secrets; print(secrets.token_urlsafe(24))"
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: MAIL_PROVIDER
+        value: imap
+      - key: IMAP_HOST
+        value: imap.gmail.com
+      - key: IMAP_PORT
+        value: "993"
+      - key: IMAP_USERNAME
+        sync: false
+      - key: IMAP_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_RECIPIENT
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        generateValue: true
+      - key: WHATSAPP_APP_SECRET
+        sync: false
