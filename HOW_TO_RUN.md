@@ -1,4 +1,4 @@
-# How to set up DontMissThoseMails (tested with IIIT `iiit.ac.in` accounts)
+# How to set up DontMissPlacements (tested with IIIT `iiit.ac.in` accounts)
 
 This guide sets up your own copy of the bot. It runs 24/7 on free services and messages **your** WhatsApp about
 **your** college mail. Nothing runs on your laptop.
@@ -56,7 +56,7 @@ Use a **new** Gmail account that only receives your college mail, so the bot doe
      Google hides app passwords.
    - Continue until it says **"2-Step Verification is on"**.
 4. Create an app password: <https://myaccount.google.com/apppasswords>
-   - Name: `DontMissThoseMails` → **Create** → copy the **16 letters** (spaces don't matter). Google shows it only once.
+   - Name: `DontMissPlacements` → **Create** → copy the **16 letters** (spaces don't matter). Google shows it only once.
    - If it says *"The setting you are looking for is not available for your account"*: 2-Step Verification isn't really on,
      you're on the wrong account, or the account is brand new (wait a few hours and retry).
 
@@ -167,7 +167,7 @@ Render's free disk is wiped on every deploy, so the bot keeps its state (deadlin
    | `WHATSAPP_APP_SECRET` | App secret |
 
    `WHATSAPP_VERIFY_TOKEN` is generated for you (see it later under **Environment**), and `MAIL_PROVIDER=imap` is preset.
-3. After the first deploy, copy your URL (e.g. `https://dontmissthosemails-abcd.onrender.com`). Go to **Environment**,
+3. After the first deploy, copy your URL (e.g. `https://dontmissplacements-abcd.onrender.com`). Go to **Environment**,
    set `APP_BASE_URL` to it (no trailing slash), and **Save changes**.
 4. Check: open `https://YOUR-APP.onrender.com/health` → `{"ok":true,…}`.
 
@@ -220,7 +220,7 @@ check mail and send due reminders.
 1. First test in your browser: `https://YOUR-APP.onrender.com/cron/tick?token=ADMIN_TOKEN` → `{"queued":true}`.
 2. <https://console.cron-job.org/signup> → sign up, confirm your email, log in.
 3. **Cronjobs → CREATE CRONJOB**
-   - **Title:** `DontMissThoseMails tick`
+   - **Title:** `DontMissPlacements tick`
    - **URL:** `https://YOUR-APP.onrender.com/cron/tick?token=ADMIN_TOKEN`
    - **Execution schedule:** every **5 minutes**
    - **Advanced:** method `GET`, timeout at the maximum (30 s). A timeout while Render wakes up is harmless.
@@ -338,8 +338,8 @@ This skips Gmail entirely, but needs an admin to approve the app. Students get *
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/YOUR-USERNAME/DontMissThoseMails.git
-cd DontMissThoseMails
+git clone https://github.com/YOUR-USERNAME/DontMissPlacements.git
+cd DontMissPlacements
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install -r requirements-dev.txt

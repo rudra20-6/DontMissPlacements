@@ -3,7 +3,7 @@
 # college Outlook -> forwarded to a Gmail "mailbot" -> read over IMAP. See HOW_TO_RUN.md.
 services:
   - type: web
-    name: dontmissthosemails
+    name: dontmissplacements
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -45,3 +45,5 @@ services:
         generateValue: true
       - key: WHATSAPP_APP_SECRET
         sync: false
+      - key: PLACEMENT_MODE
+        value: "true"

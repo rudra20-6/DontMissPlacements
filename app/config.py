@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     app_base_url: str = "http://localhost:8000"
     admin_token: str = "change-me"
     timezone: str = "Asia/Kolkata"
-    database_url: str = "sqlite:///./dontmiss.db"
+    database_url: str = "sqlite:///./dontmissplacements.db"
     log_level: str = "INFO"
     run_scheduler: bool = True
 
@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # --- Health alerts (sent to you on WhatsApp) ---
     mail_down_alert_minutes: int = 30  # mail fetch failing this long -> alert (wrong password: after 10 min)
     mail_silence_alert_hours: int = 48  # no new mail at all for this long -> "check your forwarding" (0 = off)
+
+    # --- Placement mode (switch in chat with "placement on" / "placement off") ---
+    placement_mode: bool = True  # only placement mail gets deadline/event tracking; the rest goes to the digest
+    placement_deadline_offsets_hours: str = "72,48,24,12,6,3,2,1,0.5"  # reminders before a placement deadline
+    placement_registration_offsets_hours: str = "48,24,12,6,3,1,0.5"  # ...before a placement registration closes
+    placement_event_offsets_hours: str = "24,3,1,0.25"  # ...before a placement test / talk / interview starts
+    placement_nag_hours: str = "10,14,18,21"  # local hours: extra daily nags for every open placement item
+    placement_urgent_hours: float = 12  # this close to a placement deadline, reminders ignore quiet hours
+    placement_task_hours: str = "10,18"  # "remind me to register for X" with no date: nag at these hours daily
 
     # --- Behaviour ---
     quiet_hours_start: int = 23  # local hour; no messages from this hour...
@@ -137,6 +146,26 @@ class Settings(BaseSettings):
     @property
     def registration_offsets(self) -> list[float]:
         return self._hours(self.registration_offsets_hours)
+
+    @property
+    def placement_deadline_offsets(self) -> list[float]:
+        return self._hours(self.placement_deadline_offsets_hours)
+
+    @property
+    def placement_registration_offsets(self) -> list[float]:
+        return self._hours(self.placement_registration_offsets_hours)
+
+    @property
+    def placement_event_offsets(self) -> list[float]:
+        return self._hours(self.placement_event_offsets_hours)
+
+    @property
+    def placement_nag_hour_list(self) -> list[int]:
+        return sorted({int(x) for x in self.placement_nag_hours.split(",") if x.strip()})
+
+    @property
+    def placement_task_times(self) -> list[str]:
+        return [f"{int(x):02d}:00" for x in sorted({int(x) for x in self.placement_task_hours.split(",") if x.strip()})]
 
     @property
     def sqlalchemy_url(self) -> str:

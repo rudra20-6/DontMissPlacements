@@ -15,6 +15,7 @@ os.environ.update(
         "QUIET_HOURS_START": "0",
         "QUIET_HOURS_END": "0",
         "TIMEZONE": "Asia/Kolkata",
+        "PLACEMENT_MODE": "false",  # the inherited tests cover the normal mode; tests/test_placement.py turns it on
     }
 )
 

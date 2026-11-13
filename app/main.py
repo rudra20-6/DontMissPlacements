@@ -41,7 +41,7 @@ async def lifespan(_: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="DontMissThoseMails", lifespan=lifespan)
+app = FastAPI(title="DontMissPlacements", lifespan=lifespan)
 
 
 def _check_admin(token: str | None) -> None:
@@ -59,7 +59,7 @@ def health() -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (
-        "<h2>DontMissThoseMails is running ✅</h2>"
+        "<h2>DontMissPlacements is running ✅</h2>"
         "<p>Status: <code>/status?token=ADMIN_TOKEN</code> · Outlook login: "
         "<code>/auth/microsoft/login?token=ADMIN_TOKEN</code></p>"
     )
@@ -68,17 +68,17 @@ def index() -> str:
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy() -> str:
     """Public privacy policy (Meta requires a URL before an app can be switched to Live mode)."""
-    return """<!doctype html><html><head><meta charset="utf-8"><title>Privacy Policy - DontMissThoseMails</title>
+    return """<!doctype html><html><head><meta charset="utf-8"><title>Privacy Policy - DontMissPlacements</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6">
 <h1>Privacy Policy</h1>
-<p><b>DontMissThoseMails</b> is a personal assistant used by a single person (its owner) to receive summaries
+<p><b>DontMissPlacements</b> is a personal assistant used by a single person (its owner) to receive summaries
 of their own email and reminders on their own WhatsApp number. It does not serve the public.</p>
 <h2>What is processed</h2>
 <ul><li>The owner's emails, read with read-only access, to create short summaries, deadlines and event reminders.</li>
 <li>WhatsApp messages the owner sends to the bot, to understand commands.</li></ul>
 <h2>How it is used</h2>
-<p>Email text is sent to Google's Gemini API to be summarised. Summaries, deadlines and reminders are stored in the
+<p>Email text, and messages, images or PDFs the owner forwards to the bot, are sent to Google's Gemini API to be summarised. Summaries, deadlines and reminders are stored in the
 app's database only to send reminders to the owner. Messages from any other WhatsApp number are ignored and not stored.
 No data is sold or shared with anyone else.</p>
 <h2>Deletion</h2><p>The owner can delete all stored data at any time by deleting the app's database.</p>
@@ -165,7 +165,13 @@ async def wa_incoming(request: Request, background: BackgroundTasks) -> dict:
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            to_number_id = (value.get("metadata") or {}).get("phone_number_id")
+            if to_number_id and settings.whatsapp_phone_number_id and to_number_id != settings.whatsapp_phone_number_id:
+                continue  # meant for another bot number on the same WhatsApp account
             for st in value.get("statuses", []) or []:
+                recipient = "".join(ch for ch in str(st.get("recipient_id", "")) if ch.isdigit())
+                if recipient and recipient != settings.whatsapp_recipient:
+                    continue  # a delivery report for someone else's bot
                 # Meta reports async delivery failures here (e.g. 131047 window closed, 131026 undeliverable)
                 if st.get("status") == "failed":
                     err = (st.get("errors") or [{}])[0]
@@ -185,24 +191,39 @@ async def wa_incoming(request: Request, background: BackgroundTasks) -> dict:
                 if msg.get("id") in _seen_message_ids:
                     continue
                 _seen_message_ids.append(msg.get("id"))
-                text, button = _extract(msg)
-                if text or button:
+                text, button, media = _extract(msg)
+                context = msg.get("context") or {}
+                forwarded = bool(context.get("forwarded") or context.get("frequently_forwarded"))
+                if text or button or media:
                     # a swipe-reply carries the id of the message being replied to
-                    background.add_task(_handle, text, button, (msg.get("context") or {}).get("id"))
+                    background.add_task(_handle, text, button, context.get("id"), forwarded, media)
+                elif msg.get("type") not in ("reaction", "unsupported", "system"):
+                    background.add_task(_handle_unsupported, msg.get("type"))
     return {"ok": True}
 
 
-def _extract(msg: dict) -> tuple[str | None, str | None]:
+MEDIA_TYPES = ("image/", "application/pdf")
+MAX_MEDIA_BYTES = 15 * 1024 * 1024
+
+
+def _extract(msg: dict) -> tuple[str | None, str | None, tuple[str, str] | None]:
+    """-> (text, button id, (media id, mime type)) for the message kinds the bot understands."""
     kind = msg.get("type")
     if kind == "text":
-        return msg.get("text", {}).get("body"), None
+        return msg.get("text", {}).get("body"), None, None
     if kind == "interactive":
         inter = msg.get("interactive", {})
         reply = inter.get("button_reply") or inter.get("list_reply") or {}
-        return reply.get("title"), reply.get("id")
+        return reply.get("title"), reply.get("id"), None
     if kind == "button":  # quick-reply on a template
-        return msg.get("button", {}).get("text") or "show", None
-    return None, None
+        return msg.get("button", {}).get("text") or "show", None, None
+    if kind in ("image", "document"):  # a poster or PDF from the placement group, maybe with a caption
+        m = msg.get(kind, {})
+        mime = (m.get("mime_type") or "").split(";")[0]
+        if mime.startswith(MEDIA_TYPES):
+            return m.get("caption") or "", None, (m.get("id"), mime)
+        return m.get("caption") or None, None, None
+    return None, None, None
 
 
 def _delivery_failed(wamid: str | None, code: int | None) -> None:
@@ -213,10 +234,32 @@ def _delivery_failed(wamid: str | None, code: int | None) -> None:
         log.exception("Failed handling a delivery failure")
 
 
-def _handle(text: str | None, button: str | None, context_id: str | None = None) -> None:
+def _handle(text: str | None, button: str | None, context_id: str | None = None, forwarded: bool = False,
+            media: tuple[str, str] | None = None) -> None:
+    try:
+        files = None
+        if media:
+            try:
+                mime, data = WhatsAppClient().download_media(media[0])
+                if len(data) <= MAX_MEDIA_BYTES:
+                    files = [(mime or media[1], data)]
+            except Exception:  # noqa: BLE001
+                log.exception("Couldn't download WhatsApp media")
+            if files is None and not text:
+                with session_scope() as s:
+                    notifier.reply(s, "😕 I couldn't open that file. Try again, or paste the text instead.")
+                return
+        with session_scope() as s:
+            handle_message(s, text=text, button_id=button, context_id=context_id, forwarded=forwarded, media=files)
+    except Exception:  # noqa: BLE001
+        log.exception("Failed handling WhatsApp message")
+
+
+def _handle_unsupported(kind: str | None) -> None:
     try:
         with session_scope() as s:
-            handle_message(s, text=text, button_id=button, context_id=context_id)
+            notifier.mark_inbound(s)
+            notifier.reply(s, f"🙈 I can't read {kind or 'that'} messages. Send text, an image or a PDF instead.")
     except Exception:  # noqa: BLE001
         log.exception("Failed handling WhatsApp message")
 
@@ -227,7 +270,7 @@ def _handle(text: str | None, button: str | None, context_id: str | None = None)
 def admin_test(token: str | None = Query(None)) -> dict:
     _check_admin(token)
     with session_scope() as s:
-        delivered = notifier.notify(s, "👋 Test message from DontMissThoseMails. Reply *help*!", urgent=True)
+        delivered = notifier.notify(s, "👋 Test message from DontMissPlacements. Reply *help*!", urgent=True)
     return {"delivered_now": delivered}
 
 
@@ -271,7 +314,7 @@ def whatsapp_check(token: str | None = Query(None), send: bool = False) -> dict:
             select(func.count()).select_from(Outbox).where(Outbox.sent_at.is_(None)))
     if send:
         try:
-            WhatsAppClient().send_text("🧪 whatsapp-check test message from DontMissThoseMails")
+            WhatsAppClient().send_text("🧪 whatsapp-check test message from DontMissPlacements")
             report["5_test_send"] = "accepted by Meta - check your phone"
         except Exception as exc:  # noqa: BLE001
             report["5_test_send"] = f"FAILED: {exc}"

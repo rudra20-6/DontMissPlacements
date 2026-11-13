@@ -62,6 +62,8 @@ def runs_on(sch: dict, day: date) -> bool:
 def day_slots(sch: dict, day: date) -> list[datetime]:
     """Aware local datetimes of every reminder on `day` (ignores whether the schedule runs that day)."""
     tz = get_settings().tz
+    if sch.get("times"):
+        return [datetime.combine(day, time(*_hm(t)), tzinfo=tz) for t in sorted(sch["times"])]
     first = datetime.combine(day, time(*_hm(sch["start"])), tzinfo=tz)
     every = int(sch.get("every") or 0)
     if every <= 0:
@@ -98,6 +100,8 @@ def next_slot(sch: dict, now: datetime, created: datetime | None, sent: set[str]
 
 def describe(sch: dict) -> str:
     """'Every day · 9:00 AM, then every 1 h until 10:59 PM'."""
+    if sch.get("times"):
+        return "Every day · " + ", ".join(fmt_clock(*_hm(t)) for t in sorted(sch["times"])) + " until done"
     start = fmt_clock(*_hm(sch["start"]))
     days = sch.get("days") or []
     if is_one_off(sch):

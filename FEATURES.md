@@ -1,10 +1,58 @@
-# DontMissThoseMails: Features
+# DontMissPlacements: Features
 
-A personal assistant that watches your college inbox, decides what matters, condenses it into a few lines, and sends it
-to your WhatsApp. It keeps reminding you about deadlines, and about events you said you're interested in, until you tell
-it you're done.
+A personal assistant that watches your college inbox **and the placement messages you forward to it**, decides what
+matters, condenses it into a few lines, and sends it to your WhatsApp. Placement deadlines get aggressive reminders
+until you tell it you're done.
 
 Setup: [HOW_TO_RUN.md](HOW_TO_RUN.md).
+
+---
+
+## 💼 Placement mode
+
+On by default (`PLACEMENT_MODE=true`). Switch it on WhatsApp: `placement on`, `placement off`; `placement` shows the
+current mode.
+
+**What counts as placement** is decided by Gemini for every mail, using this definition: anything from the placement
+cell / T&P / CDC, or a company recruiting through the college: registrations and application forms, eligibility
+lists, pre-placement talks, online assessments, GDs, interviews, shortlists, results, offers, placement policy. *Not*
+placement: generic job newsletters (LinkedIn, Internshala…), research positions, club recruitments, hackathons. The
+definition is `PLACEMENT_DEFINITION` in `app/services/decisions.py`; send examples of misjudged mail to tune it.
+
+| | Placement mode ON | OFF |
+|---|---|---|
+| Placement mail | pushed right away, deadlines/events tracked, **aggressive** reminders | same |
+| Other mail | one line in the 08:00 digest, no reminders | normal tracking (as in DontMissThoseMails) |
+| Things you forward or add yourself | always tracked | always tracked |
+
+### How aggressive?
+| | Normal | Placement |
+|---|---|---|
+| Before a deadline | 72, 24, 6, 1 h | 72, 48, 24, 12, 6, 3, 2, 1 h and 30 min |
+| Daily nags until done | none | 10:00, 14:00, 18:00, 21:00 (skipped if a reminder just went out) |
+| Registration closing | 48, 24, 6, 1 h + 18:00 | 48, 24, 12, 6, 3, 1 h, 30 min + the daily nags |
+| Before a test / PPT / interview | 24, 2 h | 24, 3, 1 h and 15 min |
+| "Are you interested?" asked again after | 24 h | 6 h |
+| Ignores quiet hours | last 6 h | last 12 h |
+
+All of it is configurable (`PLACEMENT_*` in [.env.example](.env.example)).
+
+### 📲 Forward from the placement WhatsApp group
+Forward any message, **poster image** or **PDF** to the bot (or paste the text). One Gemini call reads it and:
+- **deadline found** (form, registration, OA window) → 💼 deadline card, *"Tracking it"*, aggressive reminders;
+- **event found** (PPT, test, interview) → tracked; if it needs registration you're nagged to register, then reminded
+  before it starts;
+- **no date in it** → the card plus **🔔 Nag me till done**, which nags at 10:00 and 18:00 every day until ✅ Done;
+- **already tracked** (the same drive came by mail, or you forwarded it twice) → *"Already tracking this"*, no duplicate.
+
+If the AI is out of quota, a forwarded text is saved and read a few minutes later; you get the card then.
+
+### 🔔 "Remind me to register for this company"
+- After forwarding a post, *"remind me to register for this company"* → a to-do with that company's link, nagging at
+  10:00 and 18:00 daily until `done`.
+- *"remind me to register for Google"* (no date) → the same, without a link.
+- *"remind me to fill the Amazon form by Friday 6pm"* → a 💼 placement deadline with the aggressive schedule.
+- `move google to Friday 5pm` turns a to-do into a deadline once you know the date.
 
 ---
 

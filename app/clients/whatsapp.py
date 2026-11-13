@@ -81,6 +81,19 @@ class WhatsAppClient:
         )
         return {**resp, "messages": (first.get("messages") or []) + (resp.get("messages") or [])}
 
+    def download_media(self, media_id: str) -> tuple[str, bytes]:
+        """An image/PDF the user sent -> (mime type, bytes). Two calls: media id -> temporary URL -> file."""
+        headers = {"Authorization": f"Bearer {self.s.whatsapp_token}"}
+        meta = httpx.get(f"https://graph.facebook.com/{self.s.whatsapp_api_version}/{media_id}", headers=headers,
+                         timeout=30)
+        if meta.status_code >= 400:
+            raise WhatsAppError(f"media lookup HTTP {meta.status_code}: {meta.text[:300]}")
+        info = meta.json()
+        resp = httpx.get(info["url"], headers=headers, timeout=60, follow_redirects=True)
+        if resp.status_code >= 400:
+            raise WhatsAppError(f"media download HTTP {resp.status_code}")
+        return info.get("mime_type", ""), resp.content
+
     def send_template(self, param: str | None = None) -> dict:
         template: dict[str, Any] = {
             "name": self.s.whatsapp_template_name,

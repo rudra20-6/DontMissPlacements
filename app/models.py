@@ -31,6 +31,7 @@ class Email(Base):
     body: Mapped[str] = mapped_column(Text, default="")  # kept only while pending
     links: Mapped[list] = mapped_column(JSON, default=list)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(16), default="mail")  # mail | whatsapp (forwarded / pasted)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -49,6 +50,8 @@ class Item(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     link: Mapped[str] = mapped_column(Text, default="")
     importance: Mapped[float] = mapped_column(Float, default=2.0)
+    placement: Mapped[bool] = mapped_column(Boolean, default=False)  # aggressive reminders
+    source: Mapped[str] = mapped_column(String(16), default="mail")  # mail | whatsapp | chat
 
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # deadlines
     event_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -57,7 +60,8 @@ class Item(Base):
     reg_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     reg_link: Mapped[str] = mapped_column(Text, default="")
     # routine: {"start": "09:00", "every": 60 (minutes, 0 = once), "end": "17:00" or "",
-    #           "days": [0..6] (Mon=0) for repeating, or "date": "2026-10-01" for a one-off}
+    #           "days": [0..6] (Mon=0) for repeating, or "date": "2026-10-01" for a one-off,
+    #           "times": ["10:00", "18:00"] instead of start/every, "task": true = done ends it for good}
     schedule: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # deadline: pending | done | dismissed | expired

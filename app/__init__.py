@@ -1,1 +1,1 @@
-"""DontMissThoseMails - Outlook -> WhatsApp assistant for college mail."""
+"""DontMissPlacements - Outlook -> WhatsApp assistant for college mail."""

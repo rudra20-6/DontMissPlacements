@@ -8,26 +8,29 @@ the item the bot messaged about last.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app import kv
 from app.clients.gemini import LLMUnavailable
-from app.models import Item, ReminderLog
-from app.services import labels, messages, notifier, routines
-from app.services.decisions import Intent, classify_message
+from app.config import get_settings
+from app.models import Email, Item, ReminderLog
+from app.services import labels, messages, notifier, placement, routines
+from app.services.decisions import Intent, analyze_email, classify_message
 from app.services.digest import build_digest
+from app.textutil import extract_urls, truncate
 from app.timeutil import fmt, humanize_delta, local, parse_local, to_utc_naive, utcnow
 
 log = logging.getLogger(__name__)
 
 ACTIVE = ("pending", "asked", "interested", "registered", "active")
-ITEM_INTENTS = ("mark_done", "mark_registered", "interested", "not_interested", "snooze", "details", "reschedule")
+ITEM_INTENTS = ("mark_done", "mark_registered", "interested", "not_interested", "snooze", "details", "reschedule", "nag")
 UNDO_KEY = "undo"
 
 @dataclass
@@ -58,6 +61,9 @@ _SIMPLE = {
     "digest": "digest", "today": "digest", "show": "flush",
     "help": "help", "commands": "help", "?": "help", "menu": "help", "hi": "hello", "hello": "hello", "hey": "hello",
     "pause": "pause", "mute": "pause", "resume": "resume", "unmute": "resume", "undo": "undo",
+    "placement on": "placement_on", "placement mode on": "placement_on",
+    "placement off": "placement_off", "placement mode off": "placement_off",
+    "placement": "placement_status", "placement mode": "placement_status", "mode": "placement_status",
 }
 _BUTTON_OF = {"mark_done": "done", "mark_registered": "reg", "interested": "int", "not_interested": "dismiss",
               "details": "details", "snooze": "snooze"}
@@ -105,7 +111,7 @@ def parse(text: str) -> Cmd | None:
 def parse_button(button_id: str) -> Cmd | None:
     parts = button_id.split(":")
     mapping = {"done": "mark_done", "reg": "mark_registered", "int": "interested", "notint": "not_interested",
-               "dismiss": "not_interested", "snooze": "snooze", "details": "details"}
+               "dismiss": "not_interested", "snooze": "snooze", "details": "details", "nag": "nag"}
     if parts[0] == "ack":
         return Cmd("ack")
     if parts[0] == "cmd" and len(parts) > 1:
@@ -193,13 +199,17 @@ def _list_text(session: Session) -> str:
     events = [i for i in items if i.kind == "event"]
     routines_ = [i for i in items if i.kind == "routine"]
     parts = []
+    placed = [i for i in deadlines + events + routines_ if i.placement]
+    if placed:
+        parts.append("💼 *Placements*\n" + "\n".join(messages.item_line(i, _sent_keys(session, i.id)) for i in placed))
+        deadlines, events, routines_ = ([i for i in group if not i.placement] for group in (deadlines, events, routines_))
     if deadlines:
         parts.append("⏰ *Deadlines*\n" + "\n".join(messages.item_line(i) for i in deadlines))
     if events:
         parts.append("🎉 *Events*\n" + "\n".join(messages.item_line(i) for i in events))
     if routines_:
         parts.append("🔁 *Reminders*\n" + "\n".join(messages.item_line(i, _sent_keys(session, i.id)) for i in routines_))
-    return "\n\n".join(parts) + "\n\n_Say it by name, e.g._ `done dbms` _or_ `details hackathon`"
+    return "\n\n".join(parts) + "\n\n_Say it by name, e.g._ `done amazon` _or_ `details google`"
 
 
 def _now_text() -> str:
@@ -208,11 +218,16 @@ def _now_text() -> str:
 
 
 def handle_message(session: Session, text: str | None = None, button_id: str | None = None,
-                   context_id: str | None = None) -> None:
+                   context_id: str | None = None, forwarded: bool = False,
+                   media: list[tuple[str, bytes]] | None = None) -> None:
     # Any inbound message re-opens the WhatsApp 24h window: deliver everything we held back first.
     notifier.mark_inbound(session)
     notifier.flush_outbox(session, force=True)
     labels.backfill(session)
+
+    if (forwarded or media) and not button_id:
+        _share(session, text or "", media)  # a placement-group post / poster: read it and track it
+        return
 
     ctx_item = notifier.item_for_message(session, context_id)
     cmd = parse_button(button_id) if button_id else None
@@ -232,10 +247,13 @@ def handle_message(session: Session, text: str | None = None, button_id: str | N
     ai: Intent | None = None
     if (not cmd or cmd.intent == "add") and text:
         active = _active_items(session)
+        recent = _recent_shares(session)
+        shared = session.get(Item, kv.get(session, LAST_SHARE_KEY) or 0)
         try:
-            ai = classify_message(text, [(i.id, f"{i.label or ''} {i.kind}: {i.title}".strip()) for i in active],
+            ai = classify_message(text, [(i.id, f"{i.label or ''} {i.kind}: {i.title}".strip()) for i in active + recent],
                                   _now_text(),
-                                  replying_to=f"{ctx_item.id} ({ctx_item.kind}: {ctx_item.title})" if ctx_item else "")
+                                  replying_to=f"{ctx_item.id} ({ctx_item.kind}: {ctx_item.title})" if ctx_item else "",
+                                  recent_share=f"{shared.id} ({shared.kind}: {shared.title})" if shared else "")
         except LLMUnavailable:
             notifier.reply(session, "😵 My AI quota is used up for the moment, so I can only follow exact commands "
                                     "right now (e.g. `done dbms`, `list`). Send `help` for the list.")
@@ -243,6 +261,9 @@ def handle_message(session: Session, text: str | None = None, button_id: str | N
         log.info("Free-text %r -> %s", text, ai)
         if cmd and cmd.intent == "add":
             ai.intent = "add"
+        if ai.intent == "share":
+            _share(session, text)
+            return
         target = session.get(Item, ai.item_id) if ai.item_id else (ctx_item if ai.intent in ITEM_INTENTS else None)
         items = [target] if target else []
         cmd = Cmd(ai.intent, [], ai.snooze_hours if ai.intent == "snooze" else None)
@@ -254,6 +275,58 @@ def handle_message(session: Session, text: str | None = None, button_id: str | N
         guessed = ctx_item is None and target is not None
         items = [target] if target else []
     _execute(session, cmd.intent, items, cmd.hours, ai, guessed)
+
+
+LAST_SHARE_KEY = "last_shared_item"
+
+
+def _recent_shares(session: Session) -> list[Item]:
+    """Notices from the last 2 days, so "remind me to register for this company" can point at one."""
+    return list(session.scalars(
+        select(Item).where(Item.kind == "announcement", Item.created_at >= utcnow() - timedelta(days=2),
+                           or_(Item.placement.is_(True), Item.source == "whatsapp"))
+        .order_by(Item.id.desc()).limit(10)
+    ).all())
+
+
+def _share(session: Session, text: str, media: list[tuple[str, bytes]] | None = None) -> None:
+    """A message forwarded from a placement group (or a poster): extract deadlines/links and track them."""
+    from app.services import pipeline
+
+    body = text.strip()
+    if not body and not media:
+        return
+    fingerprint = hashlib.sha1(body.encode() + b"".join(data for _, data in media or [])).hexdigest()[:24]
+    message_id = f"wa-{fingerprint}"
+    if session.scalar(select(Email.id).where(Email.message_id == message_id)):
+        notifier.reply(session, "👍 I already have this one. Send `list` to see what I'm tracking.")
+        return
+    first_line = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+    email = Email(message_id=message_id, sender="WhatsApp (forwarded)", subject=(first_line or "Forwarded image")[:200],
+                  received_at=utcnow(), body=truncate(body, 20000), links=extract_urls(body)[:20], action="pending",
+                  source="whatsapp")
+    session.add(email)
+    session.flush()
+    try:
+        triage, ext = analyze_email(email.sender, "", body, local(utcnow()).isoformat(), email.links, media=media)
+    except LLMUnavailable:
+        if not body:
+            email.action = "dropped"
+            notifier.reply(session, "😵 My AI is busy right now, so I can't read that image. Send it again in a bit, "
+                                    "or paste the text.")
+        else:
+            notifier.reply(session, "😵 My AI is busy right now. I've saved this and will read it in a few minutes.")
+        return
+    dupes: list[Item] = []
+    items = pipeline.apply_analysis(session, email, triage, ext, dupes)
+    session.flush()
+    kv.put(session, LAST_SHARE_KEY, (items or dupes or [None])[0].id if (items or dupes) else None)
+    if dupes:
+        notifier.reply(session, "👍 *Already tracking this:*\n" + "\n".join(messages.item_line(i) for i in dupes))
+    if items:
+        pipeline.send_shared_items(session, items)
+    elif not dupes:
+        notifier.reply(session, "🤷 I couldn't find anything to track in that.")
 
 
 def _need_item(session: Session, items: list[Item], verb: str) -> list[Item]:
@@ -272,7 +345,8 @@ def _name(item: Item) -> str:
 def _snap(item: Item, add_keys: list[str] | None = None, del_keys: list[str] | None = None) -> dict:
     iso = lambda d: d.isoformat() if d else None  # noqa: E731
     return {"id": item.id, "status": item.status, "snoozed_until": iso(item.snoozed_until), "due_at": iso(item.due_at),
-            "event_start": iso(item.event_start), "schedule": item.schedule, "add_keys": add_keys or [],
+            "event_start": iso(item.event_start), "schedule": item.schedule, "kind": item.kind, "label": item.label,
+            "add_keys": add_keys or [],
             "del_keys": del_keys or []}
 
 
@@ -292,6 +366,7 @@ def _undo(session: Session) -> None:
             continue
         item.status, item.snoozed_until = snap["status"], dt(snap["snoozed_until"])
         item.due_at, item.event_start, item.schedule = dt(snap["due_at"]), dt(snap["event_start"]), snap["schedule"]
+        item.kind, item.label = snap.get("kind", item.kind), snap.get("label", item.label)
         if snap["add_keys"]:
             session.execute(delete(ReminderLog).where(ReminderLog.item_id == item.id,
                                                       ReminderLog.key.in_(snap["add_keys"])))
@@ -320,6 +395,14 @@ def _execute(session: Session, intent: str, targets: list[Item], hours: float | 
             notifier.reply(session, "🙂 Noted. Send `help` to see what I can do.")
     elif intent == "undo":
         _undo(session)
+    elif intent in ("placement_on", "placement_off"):
+        placement.set_mode(session, intent == "placement_on")
+        notifier.reply(session, _placement_text(session))
+    elif intent == "placement_status":
+        notifier.reply(session, _placement_text(session))
+    elif intent == "nag":
+        for base in _need_item(session, targets, "nag")[:1]:
+            _add_nag_task(session, base.title, base.reg_link or base.link, base.placement, base)
     elif intent == "pause":
         kv.put(session, notifier.PAUSE_KEY, True)
         notifier.reply(session, "🔕 *Paused.* I'll only message you for urgent reminders. Send `resume` to unmute.")
@@ -384,7 +467,7 @@ def _mark_done(session: Session, items: list[Item], hint: str) -> None:
     today = local(utcnow()).date()
     for item in items:
         sch = item.schedule or {}
-        if item.kind == "routine" and not routines.is_one_off(sch):
+        if item.kind == "routine" and not routines.is_one_off(sch) and not sch.get("task"):
             key = routines.done_key(today)
             added = [] if key in _sent_keys(session, item.id) else [key]
             snaps.append(_snap(item, add_keys=added))
@@ -448,8 +531,13 @@ def _reschedule(session: Session, item: Item, ai: Intent | None, hint: str) -> N
             item.status = "registered"
         labels.assign(session, item)
         what = f"📌 *Moved* {messages.pre(item)}*{item.title}*\n📅 Now *{fmt(new)}*  _({humanize_delta(new)})_"
+    elif (item.schedule or {}).get("task"):  # "remind me to register for X" now has a real deadline
+        item.kind, item.due_at, item.schedule, item.status, item.label = "deadline", new, None, "pending", None
+        labels.assign(session, item)
+        what = f"📌 *Deadline set* {messages.pre(item)}*{item.title}*\n⏰ Due *{fmt(new)}*  _({humanize_delta(new)})_"
     else:
         sch = dict(item.schedule or {})
+        sch.pop("times", None)
         sch["start"] = local(new).strftime("%H:%M")
         if routines.is_one_off(sch):
             sch["date"] = local(new).date().isoformat()
@@ -460,21 +548,50 @@ def _reschedule(session: Session, item: Item, ai: Intent | None, hint: str) -> N
     notifier.reply(session, what + "\n_Reminders re-planned._" + hint, item_id=item.id)
 
 
+def _placement_text(session: Session) -> str:
+    if placement.is_on(session):
+        return ("💼 *Placement mode is ON*\n\nOnly placement mail gets deadline and event reminders, and those are "
+                "aggressive (extra reminders + daily nags until you tick them off). Other mail is just listed in "
+                "the 08:00 digest.\n\n_Send_ `placement off` _to track everything again._")
+    return ("📚 *Placement mode is OFF*\n\nAll deadlines and events are tracked. Placement ones still get the "
+            "aggressive reminders.\n\n_Send_ `placement on` _to focus on placements._")
+
+
+def _add_nag_task(session: Session, title: str, link: str, is_placement: bool, base: Item | None = None) -> None:
+    """No date given: nag at PLACEMENT_TASK_HOURS every day until it's done."""
+    sch = {"times": get_settings().placement_task_times, "days": list(range(7)), "task": True}
+    item = Item(kind="routine", category="placement" if is_placement else "personal", title=title[:200],
+                link=link or "", schedule=sch, status="active", importance=3.0 if is_placement else 2.5,
+                placement=is_placement, source="chat", summary=(base.summary if base else ""))
+    session.add(item)
+    labels.assign(session, item)
+    session.flush()
+    nxt = routines.next_slot(sch, utcnow(), item.created_at, set())
+    notifier.reply(session, messages.routine_created(item, nxt), item_id=item.id)
+
+
 def _add_task(session: Session, ai: Intent | None) -> None:
+    base = session.get(Item, ai.item_id) if ai and ai.item_id else None
     due = parse_local(ai.task_due) if ai else None
-    title, is_event = (ai.task_title or "My task") if ai else "", bool(ai and ai.task_is_event)
+    title = (ai.task_title if ai else "") or (base.title if base else "") or "My task"
+    is_event = bool(ai and ai.task_is_event)
+    is_placement = bool(ai and ai.is_placement) or bool(base and base.placement)
+    link = (base.reg_link or base.link) if base else ""
     if due is None:
-        notifier.reply(session, "🤔 I couldn't find a date in that. Try `add OS quiz prep due Monday 9am`.")
+        _add_nag_task(session, title, link, is_placement, base)
         return
+    category = "placement" if is_placement else "personal"
     if is_event:
-        item = Item(kind="event", category="personal", title=title, event_start=due, status="registered", importance=2.5)
+        item = Item(kind="event", category=category, title=title, event_start=due, status="registered", importance=2.5,
+                    link=link, placement=is_placement, source="chat")
     else:
-        item = Item(kind="deadline", category="personal", title=title, due_at=due, status="pending", importance=3.0)
+        item = Item(kind="deadline", category=category, title=title, due_at=due, status="pending",
+                    importance=3.5 if is_placement else 3.0, link=link, placement=is_placement, source="chat")
     session.add(item)
     labels.assign(session, item)
     session.flush()
     what = "event" if is_event else "deadline"
-    notifier.reply(session, f"📌 *Added {what}* {messages.tag(item)}\n*{title}*\n"
+    notifier.reply(session, f"📌 *Added {what}* {messages.pre(item)}{'💼 ' if is_placement else ''}\n*{title}*\n"
                             f"{'📅' if is_event else '⏰'} {fmt(due)}  _({humanize_delta(due)})_\n\n_I'll remind you._",
                    item_id=item.id)
 

@@ -8,6 +8,7 @@ from app.services.decisions import importance_label
 from app.timeutil import fmt, fmt_clock, humanize_delta, local, to_utc_naive, utcnow
 
 CATEGORY_EMOJI = {
+    "placement": "💼",
     "coursework": "📚",
     "academic_admin": "🏛️",
     "event": "🎉",
@@ -18,6 +19,7 @@ CATEGORY_EMOJI = {
     "other": "📩",
 }
 CATEGORY_NAME = {
+    "placement": "Placement",
     "coursework": "Coursework",
     "academic_admin": "Academic notice",
     "event": "Event",
@@ -93,6 +95,15 @@ def item_card(item: Item, sender: str = "") -> str:
     return "\n".join(lines)
 
 
+def task_buttons(item: Item) -> list[tuple[str, str]]:
+    """For a shared notice with no deadline: nag about it until done?"""
+    return [(f"nag:{item.id}", "🔔 Nag me till done"), (f"done:{item.id}", "✅ Already done"), (f"dismiss:{item.id}", "🗑️ Ignore")]
+
+
+def _badge(item: Item) -> str:
+    return "💼 " if item.placement else ""
+
+
 def deadline_buttons(item: Item) -> list[tuple[str, str]]:
     return [(f"done:{item.id}", "✅ Done"), (f"snooze:{item.id}:3", "⏳ Snooze 3h"), (f"dismiss:{item.id}", "🗑️ Ignore")]
 
@@ -106,7 +117,7 @@ def registration_buttons(item: Item) -> list[tuple[str, str]]:
 
 
 def routine_buttons(item: Item) -> list[tuple[str, str]]:
-    one_off = not (item.schedule or {}).get("days")
+    one_off = not (item.schedule or {}).get("days") or is_task(item)
     return [(f"done:{item.id}", "✅ Done" if one_off else "✅ Done for today"), (f"snooze:{item.id}:0.25", "⏳ 15 min"),
             (f"dismiss:{item.id}", "🛑 Stop")]
 
@@ -115,9 +126,9 @@ def deadline_reminder(item: Item) -> str:
     assert item.due_at
     left = item.due_at - utcnow()
     if left.total_seconds() <= 6 * 3600:
-        top = f"🚨 *Due {humanize_delta(item.due_at)}!*{_dot(item)}"
+        top = f"🚨 {_badge(item)}*Due {humanize_delta(item.due_at)}!*{_dot(item)}"
     else:
-        top = f"⏰ *Reminder:* due {humanize_delta(item.due_at)}{_dot(item)}"
+        top = f"⏰ {_badge(item)}*Reminder:* due {humanize_delta(item.due_at)}{_dot(item)}"
     lines = [top, f"*{item.title}*", f"📅 {fmt(item.due_at)}"]
     if item.link:
         lines.append(f"🔗 {item.link}")
@@ -131,7 +142,7 @@ def deadline_passed(item: Item) -> str:
 
 
 def registration_reminder(item: Item) -> str:
-    lines = [f"📝 *Have you registered yet?*{_dot(item)}", f"*{item.title}*"]
+    lines = [f"📝 {_badge(item)}*Have you registered yet?*{_dot(item)}", f"*{item.title}*"]
     if item.reg_deadline:
         lines.append(f"⏳ Registration closes *{humanize_delta(item.reg_deadline)}* ({fmt(item.reg_deadline)})")
     if item.event_start:
@@ -149,7 +160,8 @@ def registration_closed(item: Item) -> str:
 
 
 def event_reminder(item: Item) -> str:
-    lines = [f"🎉 *Starting {humanize_delta(item.event_start)}!*{_dot(item)}", f"*{item.title}*",
+    lines = [f"{'💼' if item.placement else '🎉'} *Starting {humanize_delta(item.event_start)}!*{_dot(item)}",
+             f"*{item.title}*",
              f"📅 {fmt(item.event_start)}"]
     if item.venue:
         lines.append(f"📍 {item.venue}")
@@ -160,7 +172,25 @@ def reask_interest(item: Item) -> str:
     return f"🤔 *Still deciding?*{_dot(item)}\nAre you interested in *{item.title}*?"
 
 
+def is_task(item: Item) -> bool:
+    return bool((item.schedule or {}).get("task"))
+
+
+def task_card(item: Item, nxt=None) -> str:
+    sch = item.schedule or {}
+    times = " and ".join(fmt_clock(*map(int, t.split(":"))) for t in sorted(sch.get("times") or []))
+    lines = [f"🔔 {_badge(item)}*To do*{_dot(item)}", f"*{item.title}*"]
+    if item.link:
+        lines.append(f"🔗 {item.link}")
+    lines += ["", f"🗓️ I'll nag you at {times} every day until you tap ✅ Done"]
+    if nxt:
+        lines.append(f"⏭️ Next: *{fmt(to_utc_naive(nxt))}*")
+    return "\n".join(lines)
+
+
 def routine_card(item: Item, nxt=None) -> str:
+    if is_task(item):
+        return task_card(item, nxt)
     sch = item.schedule or {}
     one_off = not sch.get("days")
     every = int(sch.get("every") or 0)
@@ -180,12 +210,19 @@ def routine_card(item: Item, nxt=None) -> str:
 
 
 def routine_created(item: Item, nxt) -> str:
+    if is_task(item):
+        return task_card(item, nxt) + f"\n\n`done {ref(item)}` when it's done  ·  `move {ref(item)} to Fri 5pm` to give it a deadline"
     stop = "delete it" if not (item.schedule or {}).get("days") else "delete the routine"
     done = "done" if not (item.schedule or {}).get("days") else "done for today"
     return routine_card(item, nxt) + f"\n\n`done {ref(item)}` {done}  ·  `stop {ref(item)}` {stop}"
 
 
 def routine_reminder(item: Item, count: int | None, nxt) -> str:
+    if is_task(item):
+        lines = [f"🔔 {_badge(item)}*Still to do:* {item.title}{_dot(item)}"]
+        if item.link:
+            lines.append(f"🔗 {item.link}")
+        return "\n".join(lines + ["", "_Tap ✅ Done once it's done._"])
     sch = item.schedule or {}
     lines = [f"{'⏰' if not sch.get('days') else '🔁'} *{item.title}*{_dot(item)}"]
     every = int(sch.get("every") or 0)
@@ -219,12 +256,13 @@ def item_line(item: Item, sent: set[str] | None = None) -> str:
         done_today = sent is not None and routines.done_key(local(now).date()) in sent
         nxt = routines.next_slot(item.schedule, now, item.created_at, sent or set())
         state = "✅ _done today_" if done_today else (f"⏭️ {fmt(to_utc_naive(nxt))}" if nxt else "")
-        return (f"{_lead(item)}*{item.title}*\n      🔁 {routines.describe(item.schedule)}"
+        icon = "🔔" if is_task(item) else "🔁"
+        return (f"{_lead(item)}*{item.title}*\n      {icon} {routines.describe(item.schedule)}"
                 + (f"  ·  {state}" if state else ""))
     return f"{_lead(item)}{item.title}"
 
 
-HELP = """🤖 *DontMissThoseMails*
+HELP = """🤖 *DontMissPlacements*
 
 *📋 Overview*
 `list` · everything pending
@@ -248,6 +286,12 @@ _remind me to put attendance on ISB every hour after 9am until I say done, every
 _remind me at 5pm to call home_
 `done attendance` · done for today
 `stop attendance` · delete it
+
+*💼 Placements*
+_Forward me any message or poster from the placement group:_ I pull out the company, deadline and link and keep reminding you.
+_remind me to register for this company_ · nags you twice a day until `done`
+_remind me to fill the Amazon form by Friday 6pm_ · a placement deadline
+`placement on` / `placement off` · track only placement stuff, or everything
 
 *✨ Handy*
 ↩️ *Swipe-reply* to any of my messages with `done`, `snooze 2h`, `no`… nothing else needed

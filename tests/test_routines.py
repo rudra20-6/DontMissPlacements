@@ -40,7 +40,7 @@ class _FakePool:
         self.reply = reply
         self.calls = 0
 
-    def generate_json(self, system, prompt, schema, max_tokens=2048):
+    def generate_json(self, system, prompt, schema, max_tokens=2048, **kwargs):
         self.calls += 1
         if self.reply is None:
             raise AssertionError("AI should not be called")

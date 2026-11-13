@@ -1,16 +1,33 @@
-# DontMissThoseMails 📬 → 💬
+# DontMissPlacements 💼 → 💬
 
-**Your college inbox, condensed and sent to your WhatsApp, with reminders that keep going until you're done.**
+**Your placement season on WhatsApp: every drive, form, test and interview from your inbox *and* the placement
+WhatsApp group, with reminders that don't let go until it's done.**
+
+A spin-off of DontMissThoseMails with a **placement mode**, forwarding from WhatsApp groups and aggressive reminders.
 
 Built by an IIIT student, for IIIT students (`iiit.ac.in` Outlook accounts). Free to run, and nothing runs on your laptop.
 
-> ### 👉 Set it up: **[HOW_TO_RUN.md](HOW_TO_RUN.md)**
+> ### 👉 Already run DontMissThoseMails? **[SETUP_SECOND_BOT.md](SETUP_SECOND_BOT.md)** (what to copy, what's new)
+> ### 👉 Fresh setup: **[HOW_TO_RUN.md](HOW_TO_RUN.md)**
 > Step-by-step, about 60–90 minutes, ₹0. It's the exact setup that works with IIIT accounts, including the workarounds
 > for IIIT's "Need admin approval" block and WhatsApp's webhook quirks.
 
 ---
 
 ## What it does
+
+- 💼 **Placement mode** (on by default): Gemini picks out placement mail (drives, registrations, PPTs, OAs,
+  interviews, shortlists). Only those get deadline and event tracking; other mail is a one-liner in the 08:00 digest.
+  `placement off` tracks everything again.
+- 🚨 **Aggressive placement reminders:** 72/48/24/12/6/3/2/1 h and 30 min before a deadline, plus nags at 10:00, 14:00,
+  18:00 and 21:00 every day until you tap **✅ Done**. The last 12 h ignore quiet hours.
+- 📲 **Forward from the placement group:** forward any message, poster or PDF to the bot. It pulls out the company,
+  deadline, link and test time, and starts reminding you. Forwarding something it already has from your mail doesn't
+  create a duplicate.
+- 🔔 **"Remind me to register for this company"** → nags you twice a day until done. Give it a date and it becomes a
+  deadline.
+
+Everything from DontMissThoseMails is still here:
 
 - 📚 **Moodle assignments, quizzes, official deadlines** → a WhatsApp summary with the exact due time, then reminders at
   72h / 24h / 6h / 1h until you tap **✅ Done**.

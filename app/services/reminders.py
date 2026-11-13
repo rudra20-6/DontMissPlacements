@@ -61,7 +61,7 @@ def _nag_key(item: Item, now: datetime) -> str | None:
 def plan_routine(item: Item, now: datetime, sent: set[str]) -> list[Action]:
     """Reminders the user set up in chat. At most one message per tick; missed slots collapse into one."""
     sch = item.schedule or {}
-    if item.status != "active" or not sch.get("start"):
+    if item.status != "active" or not (sch.get("start") or sch.get("times")):
         return []
     now_l = local(now)
     today = now_l.date()
@@ -93,6 +93,21 @@ def plan_routine(item: Item, now: datetime, sent: set[str]) -> list[Action]:
                    new_status="done" if one_off and single and nxt is None else None, extra=extra)]
 
 
+def _placement_nag(item: Item, now: datetime, sent: set[str]) -> tuple[str | None, bool]:
+    """Placement items also get nagged at fixed hours every day (PLACEMENT_NAG_HOURS) until handled.
+    -> (key, send). A slot right after another reminder is only marked as used (send=False)."""
+    now_l = local(now)
+    due_hours = [h for h in get_settings().placement_nag_hour_list if h <= now_l.hour]
+    if not due_hours:
+        return None, False
+    slot = now_l.replace(hour=due_hours[-1], minute=0, second=0, microsecond=0)
+    key = f"pn{slot.strftime('%Y-%m-%dT%H')}"
+    if key in sent or local(item.created_at) >= slot or now_l - slot > timedelta(hours=2):
+        return None, False
+    recent = item.last_nag_at and now - item.last_nag_at < timedelta(minutes=90)
+    return key, not recent
+
+
 def plan(item: Item, now: datetime, sent: set[str]) -> list[Action]:
     s = get_settings()
     out: list[Action] = []
@@ -120,10 +135,18 @@ def plan(item: Item, now: datetime, sent: set[str]) -> list[Action]:
     if item.kind == "deadline" and item.status == "pending" and item.due_at:
         if now >= item.due_at:
             return out + [Action(["passed"], messages.deadline_passed(item), [(f"done:{item.id}", "✅ I did it")], new_status="expired")]
-        keys = fresh(_offset_keys(item.due_at, s.deadline_offsets, item.created_at, now, "d"))
+        offsets = s.placement_deadline_offsets if item.placement else s.deadline_offsets
+        keys = fresh(_offset_keys(item.due_at, offsets, item.created_at, now, "d"))
+        urgent = (item.due_at - now) <= timedelta(hours=s.placement_urgent_hours if item.placement else 6)
+        if item.placement:
+            nag, send = _placement_nag(item, now, sent)
+            if nag and (send or keys):
+                keys.append(nag)
+            elif nag:
+                out.append(Action([nag]))
         if keys:
-            urgent = (item.due_at - now) <= timedelta(hours=6)
-            out.append(Action(keys, messages.deadline_reminder(item), messages.deadline_buttons(item), urgent=urgent))
+            out.append(Action(keys, messages.deadline_reminder(item), messages.deadline_buttons(item), urgent=urgent,
+                              extra={"nagged": True}))
         return out
 
     # --- events ---------------------------------------------------------
@@ -135,7 +158,8 @@ def plan(item: Item, now: datetime, sent: set[str]) -> list[Action]:
             if end and now >= end:
                 return out + [Action([], new_status="expired")]
             if start:
-                keys = fresh(_offset_keys(start, s.event_offsets, item.created_at, now, "e"))
+                offsets = s.placement_event_offsets if item.placement else s.event_offsets
+                keys = fresh(_offset_keys(start, offsets, item.created_at, now, "e"))
                 if keys:
                     out.append(Action(keys, messages.event_reminder(item), urgent=True))
             return out
@@ -147,17 +171,25 @@ def plan(item: Item, now: datetime, sent: set[str]) -> list[Action]:
             return out + [Action([], new_status="expired")]
 
         if item.status == "asked":
-            if now - item.created_at >= timedelta(hours=24) and "reask" not in sent:
+            if now - item.created_at >= timedelta(hours=6 if item.placement else 24) and "reask" not in sent:
                 out.append(Action(["reask"], messages.reask_interest(item), messages.event_interest_buttons(item)))
             return out
 
         if item.status == "interested":
-            keys = fresh(_offset_keys(reg, s.registration_offsets, item.created_at, now, "r")) if reg else []
-            nag = _nag_key(item, now)
-            if nag and nag not in sent:
-                keys.append(nag)
+            offsets = s.placement_registration_offsets if item.placement else s.registration_offsets
+            keys = fresh(_offset_keys(reg, offsets, item.created_at, now, "r")) if reg else []
+            if item.placement:
+                nag, send = _placement_nag(item, now, sent)
+                if nag and (send or keys):
+                    keys.append(nag)
+                elif nag:
+                    out.append(Action([nag]))
+            else:
+                nag = _nag_key(item, now)
+                if nag and nag not in sent:
+                    keys.append(nag)
             if keys:
-                urgent = bool(reg and (reg - now) <= timedelta(hours=6))
+                urgent = bool(reg and (reg - now) <= timedelta(hours=s.placement_urgent_hours if item.placement else 6))
                 out.append(Action(keys, messages.registration_reminder(item), messages.registration_buttons(item),
                                   urgent=urgent, extra={"nagged": True}))
             return out

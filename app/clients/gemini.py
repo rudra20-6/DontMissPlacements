@@ -17,6 +17,7 @@ in two different projects (AI Studio -> Get API key -> Create API key in new pro
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import logging
 import re
@@ -247,7 +248,8 @@ class GeminiPool:
         return out
 
     # ------------------------------------------------------------------ requests
-    def _body(self, model: str, system: str, prompt: str, schema: dict | None, max_tokens: int) -> dict:
+    def _body(self, model: str, system: str, prompt: str, schema: dict | None, max_tokens: int,
+              media: list[tuple[str, bytes]] | None = None) -> dict:
         gen: dict[str, Any] = {"temperature": 0.1, "maxOutputTokens": max_tokens}
         contents_text = prompt
         body: dict[str, Any] = {}
@@ -268,7 +270,10 @@ class GeminiPool:
                     gen["thinkingConfig"] = {"thinkingBudget": 0}
                 elif re.search(r"gemini-[3-9]", model):
                     gen["thinkingConfig"] = {"thinkingLevel": "low"}
-        body["contents"] = [{"role": "user", "parts": [{"text": contents_text}]}]
+        parts: list[dict] = [{"text": contents_text}]
+        for mime, data in media or []:
+            parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}})
+        body["contents"] = [{"role": "user", "parts": parts}]
         body["generationConfig"] = gen
         return body
 
@@ -316,7 +321,8 @@ class GeminiPool:
         self._cool(key, model, 300, f"HTTP {code}: {msg[:120]}")
         return "next_model"
 
-    def _generate(self, system: str, prompt: str, schema: dict | None, max_tokens: int) -> tuple[str, str, str]:
+    def _generate(self, system: str, prompt: str, schema: dict | None, max_tokens: int,
+                  media: list[tuple[str, bytes]] | None = None) -> tuple[str, str, str]:
         if not self.enabled:
             raise LLMUnavailable("no GEMINI_API_KEYS configured")
         self._load_persisted()
@@ -324,6 +330,8 @@ class GeminiPool:
             if self._key_cool.get(_key_id(key), 0) > time.time():
                 continue
             for model in self.models_for(key):
+                if media and is_gemma(model):
+                    continue  # images/PDFs: Gemini models only
                 attempts = 0
                 while attempts < 2 and self._reserve(key, model):
                     attempts += 1
@@ -331,7 +339,7 @@ class GeminiPool:
                         resp = httpx.post(
                             f"{BASE}/models/{model}:generateContent",
                             headers={"x-goog-api-key": key},
-                            json=self._body(model, system, prompt, schema, max_tokens),
+                            json=self._body(model, system, prompt, schema, max_tokens, media),
                             timeout=60,
                         )
                     except httpx.HTTPError as exc:
@@ -354,10 +362,12 @@ class GeminiPool:
                     break  # key rejected: skip its remaining models
         raise LLMUnavailable("all Gemini keys/models are rate-limited or failing")
 
-    def generate_json(self, system: str, prompt: str, schema: dict, max_tokens: int = 2048) -> dict:
+    def generate_json(self, system: str, prompt: str, schema: dict, max_tokens: int = 2048,
+                      media: list[tuple[str, bytes]] | None = None) -> dict:
+        """media: optional (mime_type, bytes) images or PDFs sent along with the prompt."""
         last: Exception | None = None
         for _ in range(3):  # a model returning malformed JSON -> another attempt (usually the next model)
-            text, model, key = self._generate(system, prompt, schema, max_tokens)
+            text, model, key = self._generate(system, prompt, schema, max_tokens, media)
             try:
                 return extract_json(text)
             except (GeminiError, json.JSONDecodeError) as exc:

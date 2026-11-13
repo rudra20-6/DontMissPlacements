@@ -23,7 +23,17 @@ from app.textutil import truncate
 
 log = logging.getLogger(__name__)
 
+PLACEMENT_DEFINITION = (
+    "Campus placements and internship drives: anything from the placement cell / training & placement office / "
+    "CDC, or a company recruiting students through the college: company registrations and application forms, "
+    "eligibility lists, pre-placement talks (PPT), online assessments / coding tests, group discussions, "
+    "interviews, shortlists, results and offers, placement policy and placement-portal notices. NOT placement: "
+    "generic job/internship newsletters (LinkedIn, Internshala, etc.), research positions with professors, "
+    "club recruitments, hackathons and competitions (unless a company uses one as its hiring test)."
+)
+
 CATEGORIES: dict[str, str] = {
+    "placement": "Campus placement or internship drive (see the placement definition)",
     "coursework": "Course work from Moodle/LMS or a professor/TA: assignments, quizzes, labs, project submissions, grades, course material",
     "academic_admin": "Official academic notices: exams, timetable, course registration, dean/registrar/academic office/board announcements, holidays",
     "event": "Club activity, talk, workshop, seminar, fest, hackathon, competition, sports or cultural event the student can attend",
@@ -45,6 +55,7 @@ class Triage:
     is_event: float = 0.0
     needs_registration: float = 0.0
     is_noise: float = 0.0
+    is_placement: float = 0.0
     source: str = "heuristic"  # rule | gemini | heuristic
 
     def to_dict(self) -> dict:
@@ -77,7 +88,8 @@ def _apply_rules(t: Triage, rule: str | None) -> Triage:
 # Email analysis (triage + extraction in one call)
 # ---------------------------------------------------------------------------
 
-ANALYSIS_SYSTEM = """You process emails for a busy undergraduate college student and output JSON only.
+ANALYSIS_SYSTEM = """You process emails (and messages forwarded from WhatsApp groups) for a busy undergraduate college student
+and output JSON only.
 
 1) Classify:
 - category: one of
@@ -89,6 +101,8 @@ ANALYSIS_SYSTEM = """You process emails for a busy undergraduate college student
 - is_event: true if it announces a specific event the student could attend or take part in
 - needs_registration: true if taking part needs registering / signing up / RSVP / a form
 - is_noise: true if it is purely promotional, marketing, social-media or automated noise
+- is_placement: true if it is about campus placements / internship drives. {placement}
+  For placement items importance is at least 3, and the title starts with the company name.
 
 2) Condense for WhatsApp:
 - title: at most 8 words. summary: 2-4 short plain sentences: WHAT it is, WHEN/WHERE, WHAT the student must do.
@@ -111,6 +125,7 @@ ANALYSIS_SCHEMA = {
         "is_event": {"type": "BOOLEAN"},
         "needs_registration": {"type": "BOOLEAN"},
         "is_noise": {"type": "BOOLEAN"},
+        "is_placement": {"type": "BOOLEAN"},
         "title": _STR,
         "summary": _STR,
         "deadlines": {
@@ -124,12 +139,13 @@ ANALYSIS_SCHEMA = {
         "primary_link": _STR,
     },
     "required": ["category", "importance", "has_deadline", "is_event", "needs_registration", "is_noise",
-                 "title", "summary", "deadlines", "primary_link"],
+                 "is_placement", "title", "summary", "deadlines", "primary_link"],
 }
 
 
 def analyze_email(sender: str, subject: str, body: str, received_local: str, links: list[str],
-                  allow_heuristic: bool = False) -> tuple[Triage, Extraction | None]:
+                  allow_heuristic: bool = False,
+                  media: list[tuple[str, bytes]] | None = None) -> tuple[Triage, Extraction | None]:
     """Returns (triage, extraction). Extraction is None for rule-dropped mail.
 
     Raises LLMUnavailable when Gemini quota is exhausted, unless allow_heuristic=True.
@@ -145,9 +161,12 @@ def analyze_email(sender: str, subject: str, body: str, received_local: str, lin
                 ANALYSIS_SYSTEM.format(
                     categories="\n".join(f"  {k}: {v}" for k, v in CATEGORIES.items()),
                     tz=get_settings().timezone,
+                    placement=PLACEMENT_DEFINITION,
                 ),
-                f"Received: {received_local}\nFrom: {sender}\nSubject: {subject}\n\nBody:\n{truncate(body, 8000)}",
+                f"Received: {received_local}\nFrom: {sender}\nSubject: {subject}\n\nBody:\n{truncate(body, 8000)}"
+                + ("\n\n(The attached image/PDF is part of this message: read it too.)" if media else ""),
                 ANALYSIS_SCHEMA,
+                media=media,
             )
             category = r.get("category") if r.get("category") in CATEGORIES else "other"
             try:
@@ -162,6 +181,7 @@ def analyze_email(sender: str, subject: str, body: str, received_local: str, lin
                 is_event=1.0 if r.get("is_event") else 0.0,
                 needs_registration=1.0 if r.get("needs_registration") else 0.0,
                 is_noise=1.0 if r.get("is_noise") else 0.0,
+                is_placement=1.0 if (r.get("is_placement") or category == "placement") else 0.0,
                 source="gemini",
             )
             return _apply_rules(t, rule), extraction_from_llm(r, subject, links)
@@ -175,6 +195,8 @@ def analyze_email(sender: str, subject: str, body: str, received_local: str, lin
 
 
 _KW = {
+    "placement": r"placement|recruitment drive|pre-placement|\bppt\b|online assessment|\boa\b|shortlist|"
+                 r"campus hiring|internship drive|\bcdc\b|training and placement",
     "coursework": r"moodle|assignment|quiz|submission|submit|lab\b|grade|course",
     "academic_admin": r"exam|mid-?sem|end-?sem|timetable|registrar|dean|academic|holiday",
     "event": r"workshop|talk|seminar|hackathon|fest|competition|club|event|session|meetup",
@@ -188,7 +210,7 @@ def heuristic_triage(sender: str, subject: str, body: str) -> Triage:
     text = f"{subject}\n{body[:2000]}".lower()
     category = next((c for c, pat in _KW.items() if re.search(pat, text)), "other")
     deadline = bool(re.search(r"deadline|due\b|last date|submit by|before \d|by \d", text))
-    importance = {"coursework": 3, "academic_admin": 3, "event": 2, "opportunity": 2, "campus_admin": 2,
+    importance = {"placement": 3, "coursework": 3, "academic_admin": 3, "event": 2, "opportunity": 2, "campus_admin": 2,
                   "newsletter_promo": 0.4, "other": 1.5}.get(category, 1.5)
     return Triage(
         category=category,
@@ -198,6 +220,7 @@ def heuristic_triage(sender: str, subject: str, body: str) -> Triage:
         is_event=0.8 if category == "event" else 0.1,
         needs_registration=0.8 if re.search(r"regist|sign ?up|rsvp|form", text) else 0.1,
         is_noise=0.9 if category == "newsletter_promo" else 0.1,
+        is_placement=0.8 if category == "placement" else 0.0,
         source="heuristic",
     )
 
@@ -217,6 +240,8 @@ INTENTS: dict[str, str] = {
               "home', 'every day at 9am remind me to mark attendance', 'every hour after 9 until I say done')",
     "details": "wants details, the link, or the full summary of an item",
     "list": "asks what is pending / upcoming / due",
+    "share": "the message IS an announcement / notice / form / drive details pasted or copied from a group or "
+             "elsewhere (not a request to the bot): it should be read and tracked",
     "add": "wants to add a new personal DEADLINE (something due by a date, reminded before it) or an event",
     "help": "asks how to use the bot",
     "other": "greeting, thanks, or anything else",
@@ -231,6 +256,7 @@ INTENT_SCHEMA = {
         "task_title": _STR,
         "task_due": _STR,
         "task_is_event": {"type": "BOOLEAN"},
+        "is_placement": {"type": "BOOLEAN"},
         "snooze_until": _STR,
         "new_time": _STR,
         "remind_first": _STR,
@@ -252,6 +278,7 @@ class Intent:
     task_title: str = ""
     task_due: str = ""
     task_is_event: bool = False
+    is_placement: bool = False
     snooze_until: str = ""
     new_time: str = ""
     remind_first: str = ""
@@ -261,7 +288,7 @@ class Intent:
 
 
 def classify_message(message: str, candidates: list[tuple[int, str]], now_local: str,
-                     replying_to: str = "") -> Intent:
+                     replying_to: str = "", recent_share: str = "") -> Intent:
     """candidates: (item_id, description) of the user's active items. Raises LLMUnavailable."""
     items = "\n".join(f"  {iid}: {desc[:150]}" for iid, desc in candidates[:25]) or "  (none)"
     tz = get_settings().timezone
@@ -272,8 +299,11 @@ def classify_message(message: str, candidates: list[tuple[int, str]], now_local:
         "If the user is replying to a message about an item and names no other item, use that item.\n"
         "snooze: snooze_hours (default 3), or snooze_until (ISO 8601) when they name a time like 'till 8pm'.\n"
         f"All times are ISO 8601 with the {tz} offset, resolved from the current time.\n"
-        "add: task_title (<=8 words), task_due (tasks without a time -> 23:59, events -> 09:00; empty if no date), "
-        "task_is_event.\n"
+        "add: task_title (<=8 words, e.g. 'Register for Amazon SDE intern'), task_due (tasks without a time -> 23:59, "
+        "events -> 09:00; EMPTY if they give no date, e.g. 'remind me to register for Google'), task_is_event. "
+        "If they say 'this' / 'that company' / 'it', item_id is the item they mean (often the one they just "
+        "forwarded or are replying to) and task_title names it.\n"
+        f"is_placement: true if the task/reminder is about campus placements or internship drives. {PLACEMENT_DEFINITION}\n"
         "reschedule: item_id and new_time (the new due date / start time).\n"
         "remind: task_title (<=8 words, what to do, e.g. 'Put attendance on ISB'); remind_first = the FIRST reminder "
         "time (the next future occurrence; 'in 20 min' -> now + 20 min); remind_days = '' for a one-off, else "
@@ -282,6 +312,8 @@ def classify_message(message: str, candidates: list[tuple[int, str]], now_local:
         "'HH:MM' 24h if they give an end time for the day's repeats, else ''."
     )
     context = f"The user is replying to your message about item {replying_to}\n" if replying_to else ""
+    if recent_share:
+        context += f"The user recently forwarded/shared item {recent_share}\n"
     r = get_pool().generate_json(
         system, f"Current time: {now_local}\nActive items:\n{items}\n\n{context}Message: {message}", INTENT_SCHEMA,
         max_tokens=512,
@@ -304,6 +336,7 @@ def classify_message(message: str, candidates: list[tuple[int, str]], now_local:
         task_title=(r.get("task_title") or "")[:200],
         task_due=r.get("task_due") or "",
         task_is_event=bool(r.get("task_is_event")),
+        is_placement=bool(r.get("is_placement")),
         snooze_until=r.get("snooze_until") or "",
         new_time=r.get("new_time") or "",
         remind_first=r.get("remind_first") or "",

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app import kv
 from app.config import get_settings
 from app.models import Item, ReminderLog
-from app.services import health, messages, notifier, routines
+from app.services import health, messages, notifier, placement, routines
 from app.timeutil import fmt, local, utcnow
 
 DIGEST_KEY = "last_digest_date"
@@ -38,6 +38,19 @@ def build_digest(session: Session) -> str:
 
     parts = [f"☀️ *Good morning!*  ·  _{local(now).strftime('%A %d %b')}_"]
     parts += health.digest_warnings(session)
+
+    # placement first, everything placement in one place
+    p_dead = [d for d in deadlines if d.placement]
+    p_events = [e for e in events if e.placement]
+    p_tasks = [r for r in session.scalars(select(Item).where(Item.kind == "routine", Item.status == "active",
+                                                             Item.placement.is_(True))).all()
+               if (r.schedule or {}).get("task")]
+    if p_dead or p_events or p_tasks:
+        parts.append("\n💼 *Placements*\n" + "\n".join(messages.item_line(i) for i in p_dead + p_events + p_tasks))
+    deadlines = [d for d in deadlines if not d.placement]
+    events = [e for e in events if not e.placement]
+    todays_routines = [r for r in todays_routines if r not in p_tasks]
+
     soon = [d for d in deadlines if d.due_at and d.due_at <= week]
     later = [d for d in deadlines if d.due_at and d.due_at > week]
     if soon:
@@ -57,7 +70,8 @@ def build_digest(session: Session) -> str:
     if held:
         lines = [f"• {messages.CATEGORY_EMOJI.get(i.category, '📩')} *{i.title}*\n      _{i.summary[:160]}_"
                  for i in held[:15]]
-        parts.append("\n📬 *Other mail (low priority)*\n" + "\n".join(lines))
+        title = "Other mail" if placement.is_on(session) else "Other mail (low priority)"
+        parts.append(f"\n📬 *{title}*\n" + "\n".join(lines))
         for i in held:
             i.digested = True
     if not any(p.startswith("\n") for p in parts):
